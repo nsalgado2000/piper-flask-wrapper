@@ -1,0 +1,4 @@
+{
+  "dii": "/app/models/dii.onnx",
+  "ljspeech": "/app/models/ljspeech.onnx"
+}

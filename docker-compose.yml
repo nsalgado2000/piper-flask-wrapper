@@ -1,0 +1,6 @@
+services:
+  piper:
+    build: .
+    ports:
+      - "8880:8880"
+    restart: unless-stopped
