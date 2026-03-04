@@ -26,8 +26,22 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
-COPY models/ ./models/
 COPY voices.docker.json ./voices.json
+
+# Download dii (pt_BR) model from sherpa-onnx releases
+RUN mkdir -p /app/models && \
+    curl -L "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-pt_BR-dii-high.tar.bz2" \
+      -o /tmp/dii.tar.bz2 && \
+    tar -xjf /tmp/dii.tar.bz2 -C /tmp && \
+    find /tmp -name "*.onnx" | head -1 | xargs -I{} cp {} /app/models/dii.onnx && \
+    find /tmp -name "*.onnx.json" | head -1 | xargs -I{} cp {} /app/models/dii.onnx.json && \
+    rm -rf /tmp/dii.tar.bz2 /tmp/vits-piper-pt_BR-dii-high
+
+# Download ljspeech (en_US) model from HuggingFace
+RUN curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx" \
+      -o /app/models/ljspeech.onnx && \
+    curl -L "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json" \
+      -o /app/models/ljspeech.onnx.json
 
 ENV PIPER_VOICES_JSON=/app/voices.json
 ENV PIPER_DEFAULT_VOICE=dii
