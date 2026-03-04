@@ -7,6 +7,7 @@ Voices are configured via voices.json. See README for setup instructions.
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 
@@ -18,7 +19,6 @@ PIPER_BIN = os.environ.get("PIPER_BIN", "piper-tts")
 ESPEAK_DATA = os.environ.get("ESPEAK_DATA", "")
 
 # Load voices from voices.json (or PIPER_VOICES_JSON env var)
-# Format: {"voice_name": "/path/to/model.onnx", ...}
 _voices_path = os.environ.get("PIPER_VOICES_JSON", os.path.join(os.path.dirname(__file__), "voices.json"))
 if not os.path.exists(_voices_path):
     raise RuntimeError(
@@ -32,10 +32,17 @@ with open(_voices_path) as f:
 DEFAULT_VOICE = os.environ.get("PIPER_DEFAULT_VOICE", next(iter(VOICES)))
 
 
-def synthesize(text: str, voice: str) -> bytes:
-    model_path = VOICES.get(voice, VOICES[DEFAULT_VOICE])
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences for chunk streaming."""
+    sentences = re.split(r'(?<=[.!?,;:])\s+', text.strip())
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def synthesize_pcm(text: str, model_path: str) -> bytes:
+    """Synthesize a single chunk of text and return raw PCM at 24000 Hz."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
+    raw_path = tmp_path + ".raw"
 
     try:
         cmd = [PIPER_BIN, "--model", model_path, "--output_file", tmp_path, "--quiet"]
@@ -46,16 +53,14 @@ def synthesize(text: str, voice: str) -> bytes:
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.decode())
 
-        # Resample to 24000 Hz (expected by OpenAI-compatible clients)
-        resampled = tmp_path + "_24k.wav"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", resampled],
+            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", "-f", "s16le", raw_path],
             capture_output=True, check=True,
         )
-        with open(resampled, "rb") as f:
+        with open(raw_path, "rb") as f:
             return f.read()
     finally:
-        for p in [tmp_path, tmp_path + "_24k.wav"]:
+        for p in [tmp_path, raw_path]:
             if os.path.exists(p):
                 os.unlink(p)
 
@@ -73,13 +78,19 @@ def speech():
     if voice not in VOICES:
         voice = DEFAULT_VOICE
 
+    model_path = VOICES[voice]
     print(f"[TTS] voice={voice!r} text={text[:60]!r}")
-    try:
-        audio = synthesize(text, voice)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-    return Response(audio, mimetype="audio/wav")
+    sentences = split_sentences(text)
+
+    def generate():
+        for sentence in sentences:
+            try:
+                yield synthesize_pcm(sentence, model_path)
+            except Exception as e:
+                print(f"[TTS] error on sentence: {e}")
+
+    return Response(generate(), mimetype="audio/pcm")
 
 
 @app.route("/v1/models", methods=["GET"])
