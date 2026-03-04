@@ -1,0 +1,5 @@
+{
+  "ljspeech": "/path/to/en_US-ljspeech-high.onnx",
+  "lessac": "/path/to/en_US-lessac-medium.onnx",
+  "amy": "/path/to/en_US-amy-medium.onnx"
+}
