@@ -3,6 +3,11 @@
 Piper TTS HTTP server - OpenAI-compatible /v1/audio/speech endpoint
 
 Voices are configured via voices.json. See README for setup instructions.
+
+Language auto-detection: when the caller sends an unknown voice name (e.g. OpenAI
+built-ins like "alloy"), the server detects the input language via pattern matching
+and maps it to a configured voice. Override the mapping via PIPER_LANG_VOICES env
+var as a JSON object, e.g. '{"pt": "dii", "en": "ljspeech"}'.
 """
 
 import json
@@ -31,6 +36,35 @@ with open(_voices_path) as f:
 
 DEFAULT_VOICE = os.environ.get("PIPER_DEFAULT_VOICE", next(iter(VOICES)))
 
+# Language-to-voice mapping used when voice auto-detection is triggered.
+# Override via PIPER_LANG_VOICES env var as JSON, e.g. '{"pt": "dii", "en": "ljspeech"}'.
+_lang_voices_env = os.environ.get("PIPER_LANG_VOICES", "")
+LANG_VOICES: dict[str, str] = json.loads(_lang_voices_env) if _lang_voices_env else {"pt": "dii", "en": "ljspeech"}
+
+# Patterns for heuristic language detection (Portuguese vs English).
+# Portuguese is identified by accented characters and common function words.
+_PT_PATTERN = re.compile(
+    r"[ãõâêôáéíóúàüç]|"
+    r"\b(não|que|para|com|uma|isso|mas|por|mais|como|ele|ela|seu|sua|são|também|muito|sobre|entre|quando|então|ainda|onde|aqui|já|você|nos|se|ao|da|do|das|dos|num|numa)\b",
+    re.IGNORECASE,
+)
+_EN_PATTERN = re.compile(
+    r"\b(the|is|are|was|were|this|that|with|have|has|will|would|could|should|from|they|their|there|been|being|which|what|when|where|your|you|our|we|it|its|not|but|and|for|can|may|just|an|be|by|or|at|on|in|to|of|a)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_language(text: str) -> str:
+    """Detect whether text is Portuguese or English using pattern matching.
+
+    Returns 'pt', 'en', or 'unknown' if no patterns match.
+    """
+    pt_score = len(_PT_PATTERN.findall(text))
+    en_score = len(_EN_PATTERN.findall(text))
+    if pt_score == 0 and en_score == 0:
+        return "unknown"
+    return "pt" if pt_score >= en_score else "en"
+
 
 def split_sentences(text: str) -> list[str]:
     """Split text into sentences for chunk streaming."""
@@ -38,7 +72,7 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def synthesize_pcm(text: str, model_path: str) -> bytes:
+def synthesize_pcm(text: str, model_path: str, speed: float = 1.0) -> bytes:
     """Synthesize a single chunk of text and return raw PCM at 24000 Hz."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
@@ -53,10 +87,21 @@ def synthesize_pcm(text: str, model_path: str) -> bytes:
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.decode())
 
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "24000", "-ac", "1", "-f", "s16le", raw_path],
-            capture_output=True, check=True,
-        )
+        # atempo supports 0.5-2.0; chain filters for values outside that range
+        speed = max(0.25, min(speed, 4.0))
+        atempo_filters = []
+        remaining = speed
+        while remaining > 2.0:
+            atempo_filters.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5:
+            atempo_filters.append("atempo=0.5")
+            remaining /= 0.5
+        atempo_filters.append(f"atempo={remaining:.4f}")
+        af = ",".join(atempo_filters)
+
+        ffmpeg_cmd = ["ffmpeg", "-y", "-i", tmp_path, "-af", af, "-ar", "24000", "-ac", "1", "-f", "s16le", raw_path]
+        subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
         with open(raw_path, "rb") as f:
             return f.read()
     finally:
@@ -70,23 +115,27 @@ def speech():
     data = request.get_json(force=True)
     text = data.get("input", "")
     voice = data.get("voice", DEFAULT_VOICE).lower()
+    speed = float(data.get("speed", 1.0))
 
     if not text:
         return jsonify({"error": "input is required"}), 400
 
-    # Fall back to default for unknown voice names (e.g. OpenAI built-ins)
+    # Auto-detect language and pick voice when caller sends an unknown voice name
+    # (e.g. OpenAI built-ins like "alloy" that don't exist in voices.json).
     if voice not in VOICES:
-        voice = DEFAULT_VOICE
+        lang = detect_language(text)
+        voice = LANG_VOICES.get(lang, DEFAULT_VOICE)
+        print(f"[TTS] auto-detected lang={lang!r} -> voice={voice!r}")
 
     model_path = VOICES[voice]
-    print(f"[TTS] voice={voice!r} text={text[:60]!r}")
+    print(f"[TTS] voice={voice!r} speed={speed} text={text[:60]!r}")
 
     sentences = split_sentences(text)
 
     def generate():
         for sentence in sentences:
             try:
-                yield synthesize_pcm(sentence, model_path)
+                yield synthesize_pcm(sentence, model_path, speed=speed)
             except Exception as e:
                 print(f"[TTS] error on sentence: {e}")
 
