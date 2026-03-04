@@ -2,6 +2,12 @@
 
 An OpenAI-compatible HTTP server that wraps [Piper TTS](https://github.com/rhasspy/piper), exposing a `/v1/audio/speech` endpoint compatible with tools like [VoiceMode](https://github.com/mbailey/voicemode).
 
+## How it works
+
+The server splits text into sentences and synthesizes each one via Piper, streaming raw PCM chunks as they're ready. This means audio starts playing almost immediately (~2s) even for long responses, instead of waiting for the full text to be synthesized first.
+
+Each chunk is resampled to **24000 Hz mono 16-bit PCM** via ffmpeg, which is the format expected by OpenAI-compatible clients.
+
 ## Requirements
 
 - Python 3.8+
@@ -47,7 +53,7 @@ ESPEAK_DATA=/opt/piper-tts/espeak-ng-data python server.py
 
 ## Endpoints
 
-- `POST /v1/audio/speech` — Generate speech (OpenAI-compatible)
+- `POST /v1/audio/speech` — Generate speech (OpenAI-compatible), streams PCM
 - `GET /v1/models` — List available models
 - `GET /health` — Health check, lists loaded voices
 
@@ -66,6 +72,7 @@ Environment=PIPER_BIN=/usr/bin/piper-tts
 Environment=ESPEAK_DATA=/opt/piper-tts/espeak-ng-data
 Environment=PIPER_VOICES_JSON=/path/to/voices.json
 Environment=PIPER_DEFAULT_VOICE=ljspeech
+Environment=PORT=8880
 Restart=on-failure
 
 [Install]
@@ -83,5 +90,9 @@ Add to `~/.voicemode/voicemode.env`:
 
 ```env
 VOICEMODE_TTS_BASE_URLS=http://127.0.0.1:8880/v1
-VOICEMODE_TTS_AUDIO_FORMAT=wav
+VOICEMODE_TTS_AUDIO_FORMAT=pcm
 ```
+
+Make sure `VOICEMODE_STREAMING_ENABLED=true` is set (it's the default).
+
+> **Important:** If you're using Claude Code, check that `VOICEMODE_STREAMING_ENABLED` is not hardcoded to `true` in `~/.claude.json` under the voicemode MCP server env config — that would override the voicemode.env file and prevent you from disabling it.
